@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import re
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -11,7 +10,6 @@ from typing import Any, Final, cast
 from fontbakery.prelude import FAIL, WARN, Message
 from fontbakery.prelude import check as fontbakery_check
 from fontbakery.utils import bullet_list
-from fontTools.pens.boundsPen import BoundsPen
 from fontTools.ttLib.tables import otTables
 
 REPO_ROOT: Final = Path(__file__).resolve().parents[2]
@@ -129,21 +127,6 @@ SBMUFL_ISON_INDICATOR_CODEPOINTS: Final[set[int]] = {
     0xE268,  # U+E268 isonIndicatorDi
     0xE269,  # U+E269 isonIndicatorKe
     0xE26A,  # U+E26A isonIndicatorZoHigh
-}
-SBMUFL_ISON_INDICATOR_CLEARANCE: Final = 120
-SBMUFL_GORGON_TOP_CODEPOINTS: Final[set[int]] = {
-    0xE0F0,  # U+E0F0 gorgonAbove
-    0xE0F2,  # U+E0F2 gorgonDottedLeft
-    0xE0F3,  # U+E0F3 gorgonDottedRight
-}
-SBMUFL_ISON_INDICATOR_COMPROMISE_CODEPOINTS: Final[dict[int, str]] = {
-    0xE005: "oligonYpsiliRight",
-    0xE006: "oligonYpsiliLeft",
-    0xE007: "oligonKentimaYpsiliRight",
-    0xE044: "petastiYpsiliRight",
-    0xE046: "petastiKentimaYpsiliRight",
-    0xE086: "oligonYpsiliRightKentimata",
-    0xE087: "oligonYpsiliLeftKentimata",
 }
 MarkClassRef = tuple[int, int]
 
@@ -381,25 +364,6 @@ def _gpos_mark_to_base_mark_classes(
     return mark_classes
 
 
-def _gpos_mark_to_base_mark_anchor_ys(
-    ttFont: Any, glyph_names: set[str]
-) -> dict[MarkClassRef, set[tuple[str, int]]]:
-    anchor_ys: dict[MarkClassRef, set[tuple[str, int]]] = {}
-
-    for subtable_index, subtable in _gpos_mark_to_base_subtables(ttFont):
-        for glyph_name, mark_record in zip(
-            subtable.MarkCoverage.glyphs,
-            subtable.MarkArray.MarkRecord,
-            strict=True,
-        ):
-            if glyph_name in glyph_names and mark_record.MarkAnchor is not None:
-                anchor_ys.setdefault((subtable_index, mark_record.Class), set()).add(
-                    (glyph_name, mark_record.MarkAnchor.YCoordinate)
-                )
-
-    return anchor_ys
-
-
 def _gpos_mark_to_base_anchor_positions(
     ttFont: Any, mark_classes: set[MarkClassRef]
 ) -> dict[str, set[tuple[MarkClassRef, int, int]]]:
@@ -439,18 +403,6 @@ def _gpos_mark_to_base_anchor_positions(
 def _format_mark_class(mark_class: MarkClassRef) -> str:
     subtable_index, class_id = mark_class
     return f"subtable {subtable_index} class {class_id}"
-
-
-def _glyph_ymax(ttFont: Any, glyph_name: str) -> float | None:
-    glyph_set = ttFont.getGlyphSet()
-    if glyph_name not in glyph_set:
-        return None
-
-    pen = BoundsPen(glyph_set)
-    glyph_set[glyph_name].draw(pen)
-    if pen.bounds is None:
-        return None
-    return cast(float, pen.bounds[3])
 
 
 def _gdef_glyph_classes(ttFont: Any) -> Mapping[str, int]:
@@ -549,15 +501,9 @@ def check_sbmufl_mark_attachment(
 @check(
     id="sbmufl/ison_mark_vertical_positioning",
     rationale="""
-        Ison indicator glyphs are marks that attach above neumes. To keep the
-        selected ison pitch from changing the visual height of the notation,
+        Ison indicator glyphs are marks that attach above neumes.
         every base glyph that accepts an ison indicator should place that mark
-        at the ison glyph's vertical position, unless that would collide with
-        the base glyph outline or a gorgon mark attached above the neume. In
-        that case, most marks should be raised to sit 120 units above the
-        higher of the base glyph's top bound and the top of a gorgon mark
-        placed at its gorgonTop anchor. Some tight layouts use the midpoint
-        between the ison glyph's vertical position and that combined top.
+        at the ison glyph's vertical position.
     """,
     proposal="https://github.com/neanes/sbmufl",
 )
@@ -608,117 +554,13 @@ def check_sbmufl_ison_mark_vertical_positioning(
         )
         return
 
-    encoded_gorgon_top_marks = {
-        cmap[codepoint]
-        for codepoint in sorted(SBMUFL_GORGON_TOP_CODEPOINTS.intersection(cmap))
-    }
-    gorgon_top_mark_classes = _gpos_mark_to_base_mark_classes(
-        ttFont,
-        encoded_gorgon_top_marks,
-    )
-    gorgon_top_mark_anchor_ys = _gpos_mark_to_base_mark_anchor_ys(
-        ttFont,
-        encoded_gorgon_top_marks,
-    )
-
     reference_y = next(iter(reference_y_positions))
-    glyph_ymax_by_name: dict[str, float] = {}
-    missing_bounds: list[str] = []
-    for glyph_name in sorted(anchor_positions):
-        glyph_ymax = _glyph_ymax(ttFont, glyph_name)
-        if glyph_ymax is None:
-            missing_bounds.append(glyph_name)
-        else:
-            glyph_ymax_by_name[glyph_name] = glyph_ymax
-
-    if missing_bounds:
-        yield FAIL, Message(
-            "missing-ison-base-bounds",
-            "Ison indicator base glyphs missing outline bounds:\n\n"
-            f"{bullet_list(config, missing_bounds)}",
-        )
-        return
-
-    gorgon_top_positions = _gpos_mark_to_base_anchor_positions(
-        ttFont,
-        gorgon_top_mark_classes,
-    )
-    gorgon_top_ymax_by_name = {
-        glyph_name: glyph_ymax
-        for glyph_name in encoded_gorgon_top_marks
-        for glyph_ymax in [_glyph_ymax(ttFont, glyph_name)]
-        if glyph_ymax is not None
-    }
-    gorgon_top_extents_by_class = {
-        mark_class: max(
-            gorgon_top_ymax_by_name[mark_name] - mark_anchor_y
-            for mark_name, mark_anchor_y in mark_anchor_ys
-            if mark_name in gorgon_top_ymax_by_name
-        )
-        for mark_class, mark_anchor_ys in gorgon_top_mark_anchor_ys.items()
-        if any(mark_name in gorgon_top_ymax_by_name for mark_name, _ in mark_anchor_ys)
-    }
-    gorgon_placed_tops_by_name = {
-        glyph_name: max(
-            y + gorgon_top_extents_by_class[mark_class]
-            for mark_class, _, y in positions
-            if mark_class in gorgon_top_extents_by_class
-        )
-        for glyph_name, positions in gorgon_top_positions.items()
-        if any(
-            mark_class in gorgon_top_extents_by_class for mark_class, _, _ in positions
-        )
-    }
-    compromise_glyph_names = {
-        cmap[codepoint]
-        for codepoint in SBMUFL_ISON_INDICATOR_COMPROMISE_CODEPOINTS
-        if codepoint in cmap
-    }
-    glyph_top_by_name = {
-        glyph_name: max(
-            glyph_ymax,
-            gorgon_placed_tops_by_name.get(glyph_name, glyph_ymax),
-        )
-        for glyph_name, glyph_ymax in glyph_ymax_by_name.items()
-    }
-    full_expected_y_by_name = {
-        glyph_name: max(
-            reference_y,
-            math.ceil(glyph_top + SBMUFL_ISON_INDICATOR_CLEARANCE),
-        )
-        for glyph_name, glyph_top in glyph_top_by_name.items()
-    }
-    compromise_base_y_by_name = {
-        glyph_name: max(
-            reference_y,
-            gorgon_placed_tops_by_name.get(glyph_name, reference_y),
-        )
-        for glyph_name in glyph_ymax_by_name
-    }
-    expected_y_by_name = {
-        glyph_name: (
-            reference_y
-            if glyph_name == "ison"
-            else (
-                math.ceil(
-                    (
-                        compromise_base_y_by_name[glyph_name]
-                        + full_expected_y_by_name[glyph_name]
-                    )
-                    / 2
-                )
-                if glyph_name in compromise_glyph_names
-                else full_expected_y_by_name[glyph_name]
-            )
-        )
-        for glyph_name in glyph_ymax_by_name
-    }
     inconsistent_positions = [
         f"{glyph_name}: {_format_mark_class(mark_class)}, X={x}, Y={y} "
-        f"(expected Y={expected_y_by_name[glyph_name]})"
+        f"(expected Y={reference_y})"
         for glyph_name, positions in sorted(anchor_positions.items())
         for mark_class, x, y in sorted(positions)
-        if y != expected_y_by_name[glyph_name]
+        if y != reference_y
     ]
     if inconsistent_positions:
         yield FAIL, Message(
